@@ -328,7 +328,7 @@ jobs:
         # 旧写法只在「取消发生在 Run OpenCode 步」时接力；若运营者在**还原/安装期间**就取消
         # （此时 run_opencode 是 skipped、不是 cancelled）⇒ 不接力 ⇒ 只能等 6 小时 cron，
         # 运营者观感＝「循环没启动」。用 `cancelled()` 覆盖任意时刻的取消（lock 已获得即可）。
-        if: always() && steps.lock.outputs.acquired == 'true' && (steps.run_opencode.outcome == 'success' || cancelled())
+        if: false
         run: |
           set +e
           echo "Relaying next run (run_opencode outcome=${{ steps.run_opencode.outcome }})."
