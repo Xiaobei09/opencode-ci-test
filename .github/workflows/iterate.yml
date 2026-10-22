@@ -147,13 +147,36 @@ jobs:
           done
           echo "targets and environment restored in parallel"
 
+      - name: Prefer IPv4 for package downloads
+        # Test-only workaround: the runner's IPv6 route to registry.npmjs.org is
+        # black-holed, so curl/npm sit on the AAAA record until the connect timeout.
+        # The production repo does not carry this step.
+        if: steps.lock.outputs.acquired == 'true'
+        run: |
+          set -euo pipefail
+          echo 'ipv4' >> "$HOME/.curlrc"
+          echo "NODE_OPTIONS=--dns-result-order=ipv4first" >> "$GITHUB_ENV"
+          getent ahosts registry.npmjs.org | head -5 || true
+
       - name: Install OpenCode 2 and workferry
         if: steps.lock.outputs.acquired == 'true'
         run: |
           set -euo pipefail
-          curl -fsSL https://opencode.ai/v2/install | bash
+          ok=0
+          for attempt in 1 2 3; do
+            if curl -fsSL https://opencode.ai/v2/install | bash; then ok=1; break; fi
+            echo "::warning::opencode install attempt $attempt failed; retrying"
+            sleep 5
+          done
+          [ "$ok" = 1 ] || exit 1
           echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
-          npm install -g workferry
+          ok=0
+          for attempt in 1 2 3; do
+            if npm install -g workferry; then ok=1; break; fi
+            echo "::warning::workferry install attempt $attempt failed; retrying"
+            sleep 5
+          done
+          [ "$ok" = 1 ] || exit 1
 
       - name: Select egress proxy
         # The opencode zen free tier is quota'd per client IP. A long-lived runner burns
