@@ -400,7 +400,13 @@ jobs:
             # 的最新远端对象，再判断 HEAD 是否真正可从远端到达。fetch 失败/超时则
             # 保持全量包，绝不因陈旧 ref 误判 slim 而丢可恢复性。
             if [ -n "$REMOTE" ] && [ -n "$BRANCH" ]; then
-              timeout 20 git -C "$repo_dir" fetch --quiet --no-tags origin "$BRANCH" 2>/dev/null || true
+              # R2506: a single-branch restore only tracks main. A target checked out
+              # on a feature branch (e.g. test/egress-parallel) therefore had no
+              # refs/remotes/origin/<branch>; `branch -r --contains` failed and every
+              # save fell back to full .git. Fetch into the tracking ref explicitly,
+              # then the slim test below is meaningful for all branches.
+              timeout 20 git -C "$repo_dir" fetch --quiet --no-tags origin \
+                "+refs/heads/$BRANCH:refs/remotes/origin/$BRANCH" 2>/dev/null || true
             fi
             if [ -n "$COMMIT" ] && [ -n "$BRANCH" ] && [ ! -f "$repo_dir/.gitmodules" ] \
                && ! git -C "$repo_dir" ls-files -u 2>/dev/null | grep -q . \
