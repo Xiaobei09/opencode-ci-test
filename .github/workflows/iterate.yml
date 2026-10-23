@@ -566,6 +566,8 @@ jobs:
             fi
           fi
           if [ "$SKIP_ENV_PACK" != 1 ]; then
+          # R2506: keep transient shell outputs from bloating the fallback pack.
+          find "$HOME/.local/share/opencode/shell" -type f -size +50M -delete 2>/dev/null || true
           "${TAR_COMP[@]}" -C "$HOME" \
             --exclude='./work' \
             --exclude='./.cache' \
