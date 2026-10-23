@@ -28,7 +28,7 @@ echo 0 > "$EGRESS_EPOCH_FILE"
 egress_bl_init
 egress_bl_prune
 
-# R? (2026-10-23): time-to-first-good-egress is what delays the OpenCode step.
+# R2501 (2026-10-23): time-to-first-good-egress is what delays the OpenCode step.
 # Three changes keep the same correctness (every candidate still has to pass the
 # REAL inference preflight) while cutting the worst case:
 #   1. probe up to 4 candidates concurrently, in candidate order (so a good
@@ -113,13 +113,16 @@ log "candidates: $(wc -l < "$EGRESS_CANDIDATES_FILE")"
 LAST_UP=$(jq -r '.upstream // ""' "$EGRESS_STATE_FILE" 2>/dev/null || true)
 if [ "${LAST_UP#relay:}" != "$LAST_UP" ] && [ -n "${LAST_UP#relay:}" ]; then
   last_target="${LAST_UP#relay:}"
-  if ! awk -F'\t' -v t="$last_target" '$1=="relay" && $2==t{f=1} END{exit !f}' "$EGRESS_CANDIDATES_FILE"; then
-    { head -n 1 "$EGRESS_CANDIDATES_FILE"
-      printf 'relay\t%s\tlast-good-relay\n' "$last_target"
-      tail -n +2 "$EGRESS_CANDIDATES_FILE"
-    } > "$EGRESS_CANDIDATES_FILE.tmp" && mv "$EGRESS_CANDIDATES_FILE.tmp" "$EGRESS_CANDIDATES_FILE"
-    log "previous relay promoted: $last_target"
-  fi
+  # Keep direct first (fresh runner IP is still the preferred egress), then put
+  # the known-good relay second. It may be buried deep in the reputation list;
+  # this moves it (or inserts it when the list changed).
+  awk -F'\t' -v OFS='\t' -v t="$last_target" '
+    NR == 1 { print; print "relay", t, "last-good-relay"; next }
+    $1 == "relay" && $2 == t { next }
+    { print }
+  ' "$EGRESS_CANDIDATES_FILE" > "$EGRESS_CANDIDATES_FILE.tmp" \
+    && mv "$EGRESS_CANDIDATES_FILE.tmp" "$EGRESS_CANDIDATES_FILE"
+  log "previous relay promoted: $last_target"
 fi
 
 # ---- pick the first candidate that passes the real preflight --------------
