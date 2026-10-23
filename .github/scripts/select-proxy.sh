@@ -44,6 +44,9 @@ SELECT_BUDGET="${EGRESS_SELECT_BUDGET:-180}"
 SELECT_MAX="${EGRESS_SELECT_MAX:-48}"
 PARALLEL="${EGRESS_PARALLEL:-4}"
 PREFLIGHT_TMO="${EGRESS_PREFLIGHT_TIMEOUT:-8}"
+# A killed probe must not leave its curl/inference child running for the full
+# timeout after we already picked a winner; timeout forwards TERM to the child.
+PROBE_TIMEOUT=$((PREFLIGHT_TMO + 2))
 [ "$PARALLEL" -ge 1 ] 2>/dev/null || PARALLEL=1
 [ "$PARALLEL" -le 8 ] 2>/dev/null || PARALLEL=8
 START=$(egress_now)
@@ -161,18 +164,27 @@ while [ "$i" -lt "${#KIND[@]}" ] && [ -z "$SELECTED_KIND" ]; do
     pf="$EGRESS_STATE_DIR/preflight.$$.$idx"
     rm -f "$pf"
     if [ "$kind" = "direct" ]; then
-      ( bash "$SCRIPT_DIR/egress-preflight.sh" direct "" "$PREFLIGHT_TMO" > "$pf" 2>/dev/null || true ) &
+      timeout --signal=TERM --kill-after=2s "$PROBE_TIMEOUT" \
+        bash "$SCRIPT_DIR/egress-preflight.sh" direct "" "$PREFLIGHT_TMO" > "$pf" 2>/dev/null &
     else
-      ( bash "$SCRIPT_DIR/egress-preflight.sh" "$kind" "$target" "$PREFLIGHT_TMO" > "$pf" 2>/dev/null || true ) &
+      timeout --signal=TERM --kill-after=2s "$PROBE_TIMEOUT" \
+        bash "$SCRIPT_DIR/egress-preflight.sh" "$kind" "$target" "$PREFLIGHT_TMO" > "$pf" 2>/dev/null &
     fi
-    B_REC+=("$idx|$kind|$target|$source|$key|$up|$pf")
+    B_REC+=("$idx|$kind|$target|$source|$key|$up|$pf|$!")
     B_KEYS+=("$key")
   done
-  wait
-  # Process the batch in list order. A success is remembered; failures are
-  # blacklisted even if an earlier candidate already won (keeps the next run fast).
+  # Process the batch in list order, but do not wait for lower-priority probes
+  # once the earliest success is known. The old `wait` made a healthy direct
+  # candidate sit through the full 8s timeout of three dead relays; with 4-way
+  # parallelism that wait was pure latency. We still wait for every candidate
+  # *before* the winner, so priority is unchanged. Failures that were still
+  # running at fast-exit are not blacklisted this round (they are retried next
+  # run) — correctness of the chosen egress is unaffected.
+  pos=0
   for rec in "${B_REC[@]+"${B_REC[@]}"}"; do
-    IFS='|' read -r idx kind target source key up pf <<< "$rec"
+    IFS='|' read -r idx kind target source key up pf pid <<< "$rec"
+    pos=$((pos + 1))
+    if [ -n "${pid:-}" ]; then wait "$pid" 2>/dev/null || true; fi
     out=$(cat "$pf" 2>/dev/null || true); rm -f "$pf"
     code=${out%%$'\t'*}
     why=${out##*$'\t'}
@@ -190,7 +202,17 @@ while [ "$i" -lt "${#KIND[@]}" ] && [ -z "$SELECTED_KIND" ]; do
         egress_bl_del "$key"
         log "selected $kind $target egress=$SELECTED_EGRESS code=200 (batch=$batch_start)"
       fi
-      continue
+      # Stop paying for lower-priority probes as soon as the winner is known.
+      killed=0
+      for rec2 in "${B_REC[@]:$pos}"; do
+        IFS='|' read -r _i2 _k2 _t2 _s2 _key2 _up2 pf2 pid2 <<< "$rec2"
+        if [ -n "${pid2:-}" ]; then
+          if kill "$pid2" 2>/dev/null; then killed=$((killed + 1)); fi
+          rm -f "$pf2"
+        fi
+      done
+      log "fast-exit after success (killed=$killed lower-priority probe(s))"
+      break
     fi
     ttl=21600
     [ "$why" = "transport" ] && ttl=1800
