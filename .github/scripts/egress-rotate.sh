@@ -38,11 +38,22 @@ case "$CUR_KIND" in
   *)      CUR_KEY="$CUR_UP" ;;
 esac
 
+# R2509: quota follows the account/model, not the egress IP (measured: direct +
+# 48 relays all 429). Do not blacklist the current route for quota, and only
+# sample a few relays before keeping it; transport failures still use the full
+# candidate budget.
+MAX_TRIES=${EGRESS_SELECT_MAX:-48}
+[ "$REASON" = "quota" ] && MAX_TRIES=${EGRESS_QUOTA_PROBE_MAX:-4}
+
 # Mark the current egress as unusable for a while. For a relay/http candidate
 # the key is the entry address; the preflight that just failed was the same one.
 CUR_EGRESS=$(jq -r '.egress_ip // empty' "$EGRESS_STATE_FILE" 2>/dev/null || true)
-egress_bl_add "$CUR_KEY" "$CUR_EGRESS" "$REASON" "$TTL" || true
-echo "rotate: blacklisted $CUR_KEY ($REASON, ${TTL}s)"
+if [ "$REASON" = "quota" ]; then
+  echo "rotate: quota is account-wide; keeping $CUR_KEY eligible (not blacklisted)"
+else
+  egress_bl_add "$CUR_KEY" "$CUR_EGRESS" "$REASON" "$TTL" || true
+  echo "rotate: blacklisted $CUR_KEY ($REASON, ${TTL}s)"
+fi
 
 tries=0
 quota_fails=0
@@ -62,9 +73,10 @@ while IFS=$'\t' read -r kind target source; do
     continue
   fi
   tries=$((tries + 1))
-  # Same tuning as select-proxy: 8s is enough for a real inference answer; 48
-  # candidates is ~4x the observed need. Keeps a quota rotation short.
-  [ "$tries" -gt "${EGRESS_SELECT_MAX:-48}" ] && { echo "rotate: candidate budget exhausted"; break; }
+  # Same tuning as select-proxy: 8s is enough for a real inference answer. Quota
+  # rotations only sample EGRESS_QUOTA_PROBE_MAX relays (default 4); transport
+  # rotations keep the full 48-candidate budget.
+  [ "$tries" -gt "$MAX_TRIES" ] && { echo "rotate: candidate budget exhausted ($MAX_TRIES)"; break; }
 
   out=$(bash "$SCRIPT_DIR/egress-preflight.sh" "$kind" "$([ "$kind" = direct ] && echo '' || echo "$target")" "${EGRESS_PREFLIGHT_TIMEOUT:-8}" 2>/dev/null || true)
   code=${out%%$'\t'*}

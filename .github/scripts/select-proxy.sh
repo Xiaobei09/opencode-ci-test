@@ -44,6 +44,13 @@ SELECT_BUDGET="${EGRESS_SELECT_BUDGET:-180}"
 SELECT_MAX="${EGRESS_SELECT_MAX:-48}"
 PARALLEL="${EGRESS_PARALLEL:-4}"
 PREFLIGHT_TMO="${EGRESS_PREFLIGHT_TIMEOUT:-8}"
+# R2509: quota is account/model-wide (measured 2026-10-25: direct + 48 proxyip
+# relays all answered 429 quota). Once direct itself answers quota, probing the
+# whole relay list only delays startup; sample a few relays and then fall back
+# to direct. Transport failures still use the full budget.
+QUOTA_PROBE_MAX="${EGRESS_QUOTA_PROBE_MAX:-4}"
+quota_fails=0
+direct_quota=0
 # A killed probe must not leave its curl/inference child running for the full
 # timeout after we already picked a winner; timeout forwards TERM to the child.
 PROBE_TIMEOUT=$((PREFLIGHT_TMO + 2))
@@ -216,6 +223,11 @@ while [ "$i" -lt "${#KIND[@]}" ] && [ -z "$SELECTED_KIND" ]; do
     fi
     ttl=21600
     [ "$why" = "transport" ] && ttl=1800
+    [ "$why" = "quota" ] && ttl=1800
+    if [ "$why" = "quota" ]; then
+      quota_fails=$((quota_fails + 1))
+      [ "$kind" = "direct" ] && direct_quota=1
+    fi
     if [ "$kind" = "direct" ]; then
       failed_egress="${DIRECT_IP:-}"
     elif [ "$why" = "quota" ] || [ "$why" = "body_error" ]; then
@@ -225,9 +237,19 @@ while [ "$i" -lt "${#KIND[@]}" ] && [ -z "$SELECTED_KIND" ]; do
     else
       failed_egress=""
     fi
-    egress_bl_add "$key" "$failed_egress" "$why" "$ttl" || true
-    log "candidate $kind $target failed code=$code reason=$why egress=${failed_egress:-?} (blacklist ${ttl}s)"
+    # R2509: never blacklist direct for quota — it is the fallback route and
+    # quota follows the account, not this runner's IP.
+    if [ "$kind" = "direct" ] && [ "$why" = "quota" ]; then
+      log "candidate direct failed code=$code reason=quota egress=${failed_egress:-?} (kept as fallback)"
+    else
+      egress_bl_add "$key" "$failed_egress" "$why" "$ttl" || true
+      log "candidate $kind $target failed code=$code reason=$why egress=${failed_egress:-?} (blacklist ${ttl}s)"
+    fi
   done
+  if [ "$direct_quota" = 1 ] && [ "$quota_fails" -ge "$QUOTA_PROBE_MAX" ] && [ -z "$SELECTED_KIND" ]; then
+    log "quota on direct + $quota_fails relay(s): account-wide quota, stop probing (budget ${QUOTA_PROBE_MAX} relays)"
+    break
+  fi
 done
 
 if [ -z "$SELECTED_KIND" ]; then
