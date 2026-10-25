@@ -17,8 +17,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REASON="${1:-quota}"
 [ "$REASON" = "--reason" ] && REASON="${2:-quota}"
 case "$REASON" in
-  quota)     TTL=21600 ;;  # 6h: OpenCode free-tier window is unknown but >15m
-  transport) TTL=1800  ;;  # 30m for dead relays
+  quota)     TTL=1800 ;;  # 30m: quota is usually account/model-wide, not IP-wide
+  transport) TTL=1800 ;;  # 30m for dead relays
   *)         TTL=3600  ;;
 esac
 
@@ -45,6 +45,8 @@ egress_bl_add "$CUR_KEY" "$CUR_EGRESS" "$REASON" "$TTL" || true
 echo "rotate: blacklisted $CUR_KEY ($REASON, ${TTL}s)"
 
 tries=0
+quota_fails=0
+other_fails=0
 while IFS=$'\t' read -r kind target source; do
   [ -n "${kind:-}" ] || continue
   case "$kind" in
@@ -91,9 +93,18 @@ while IFS=$'\t' read -r kind target source; do
   else
     failed_egress=""
   fi
+  if [ "$why" = "quota" ]; then quota_fails=$((quota_fails + 1)); else other_fails=$((other_fails + 1)); fi
   egress_bl_add "$key" "$failed_egress" "$why" "$TTL" || true
   echo "rotate: candidate $kind $target failed code=$code reason=$why egress=${failed_egress:-?}"
 done < "$EGRESS_CANDIDATES_FILE"
 
-echo "rotate: no candidate passed the preflight"
+# No alternative passed. The egress we were already using is still the best
+# choice we have, so undo its blacklist entry instead of leaving the runner
+# with no usable route (and a 30m hole in the candidate list). Quota failures
+# are almost always account/model-wide: rotating IPs cannot buy quota back.
+egress_bl_del "$CUR_KEY"
+echo "rotate: no candidate passed the preflight; keeping current egress and unblacklisting $CUR_KEY (quota_fails=$quota_fails other_fails=$other_fails)"
+if [ "$quota_fails" -gt 0 ] && [ "$other_fails" -eq 0 ]; then
+  exit 2
+fi
 exit 1

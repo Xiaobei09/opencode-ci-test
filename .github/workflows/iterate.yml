@@ -460,36 +460,13 @@ jobs:
         # 「取消在还原途中」留下的半套/空 $HOME 固化进 release（那正是 R44 那轮丢失的成因）。
         if: always() && steps.lock.outputs.acquired == 'true' && steps.restore_ws.outcome == 'success'
         env:
-          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           SPLIT_SIZE: ${{ inputs.split_size }}
         run: |
           set +e
           ENV_SRC="$SESSIONS_DIR/opencode"
           mkdir -p "$ENV_SRC"
-          # Best-effort scrub of the bot token from plaintext files under $HOME.
-          if [ -n "${TG_BOT_TOKEN:-}" ]; then
-            grep -rlI -F "$TG_BOT_TOKEN" "$HOME" \
-              --exclude-dir=.cache --exclude-dir=.npm --exclude-dir=.bun --exclude-dir=bin \
-              --exclude-dir=work --exclude-dir=.git 2>/dev/null \
-              | while IFS= read -r f; do sed -i "s/${TG_BOT_TOKEN}/REDACTED/g" "$f" 2>/dev/null; done
-          fi
-          # Value-independent scrub (ROUND 10 / D3): telegram bot tokens have a fixed
-          # shape (<6-12 digits>:<30+ base64url chars>). This also covers the per-bot
-          # tokens (tg-bot3 / tg-bot4) which are NOT present as CI secrets, so the
-          # value-only scrub above silently misses them. Text files only (-I skips the
-          # binary sqlite session db, which is excluded from the package separately).
-          grep -rlIE '[0-9]{6,12}:[A-Za-z0-9_-]{30,}' "$HOME" \
-            --exclude-dir=.cache --exclude-dir=.npm --exclude-dir=.bun --exclude-dir=bin \
-            --exclude-dir=work --exclude-dir=.git 2>/dev/null \
-            | while IFS= read -r f; do sed -i -E 's/[0-9]{6,12}:[A-Za-z0-9_-]{30,}/REDACTED/g' "$f" 2>/dev/null; done
-          # ROUND 24 / D3: the $HOME scrub above excludes work/ — and the sessions
-          # repository lives in work/. Yet that tree is (a) packaged by the target tar
-          # below (sessions/state/tasks) and uploaded to the release, and (b) force-pushed
-          # wholesale to git by the "Rebuild repository baseline" step, where a leaked
-          # token becomes permanent history. Scrub the repository tree as well.
-          grep -rlIE '[0-9]{6,12}:[A-Za-z0-9_-]{30,}' "$SESSIONS_DIR" \
-            --exclude-dir=.git 2>/dev/null \
-            | while IFS= read -r f; do sed -i -E 's/[0-9]{6,12}:[A-Za-z0-9_-]{30,}/REDACTED/g' "$f" 2>/dev/null; done
+          # R2508: sessions repo is PRIVATE — no scrubbing (operator instruction).
+          # The old scrub rewrote tg-bot*.env/DB with REDACTED and broke bot restore.
           # Whole-package capture: tar the ENTIRE $HOME in one go - a complete snapshot,
           # not a delta/overlay. This is what guarantees completeness: the agent may drop
           # files anywhere, and files it copies or moves keep their old timestamps, so a
@@ -509,19 +486,7 @@ jobs:
             python3 -c 'import sqlite3;c=sqlite3.connect("'"$HOME"'/.local/share/opencode/opencode.db");c.execute("PRAGMA wal_checkpoint(TRUNCATE)");c.close()' 2>/dev/null \
               && echo "sqlite WAL checkpointed" || echo "::warning::sqlite WAL checkpoint skipped"
           fi
-          # Binary DB redaction (ROUND 14 / D3). The text scrub above uses `grep -I`, so it
-          # SKIPS the binary sqlite session DB - which therefore carried bot tokens straight
-          # into every env package (measured: 62 hits, two distinct tokens). The DB cannot
-          # be sed-edited, but a telegram token is ASCII and lives only inside string
-          # values, so a LENGTH-PRESERVING byte replacement is safe for sqlite: page
-          # offsets never move (verified on a copy: PRAGMA integrity_check=ok, all rows
-          # intact). Runs AFTER the WAL checkpoint so the main file holds every page, and
-          # before the tar; temp+rename makes an interrupted run non-destructive.
-          for dbf in "$HOME/.local/share/opencode/opencode.db" "$HOME/.local/share/opencode/opencode.db-wal" "$HOME/.local/share/opencode/opencode.db-shm"; do
-            [ -f "$dbf" ] || continue
-            python3 -c 'import os,re,sys;p=sys.argv[1];pat=re.compile(rb"[0-9]{6,12}:[A-Za-z0-9_-]{30,}");b=open(p,"rb").read();nb=pat.sub(lambda m:b"X"*len(m.group(0)),b);m=os.stat(p).st_mode&0o777;t=p+".redact";open(t,"wb").write(nb);os.chmod(t,m);os.replace(t,p)' "$dbf" \
-              && echo "db token-redacted: $(basename "$dbf")" || echo "::warning::db redaction skipped: $(basename "$dbf")"
-          done
+          # R2508: no binary DB redaction — sessions repo is private.
           OUT=/tmp/envsnap
           rm -rf "$OUT" && mkdir -p "$OUT"
           # R341 (non-agent time): pack with parallel gzip when available. pigz output
